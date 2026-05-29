@@ -1,0 +1,8 @@
+# Godot 4 — generated files (safe to exclude)
+.godot/
+*.import
+export_presets.cfg
+
+# OS files
+.DS_Store
+Thumbs.db

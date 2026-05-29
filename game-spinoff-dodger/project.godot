@@ -1,0 +1,20 @@
+; Engine configuration file.
+config_version=5
+
+[application]
+config/name="Dragon Boat Dodger"
+run/main_scene="res://scenes/Main.tscn"
+config/features=PackedStringArray("4.2", "GL Compatibility")
+
+[display]
+window/size/viewport_width=960
+window/size/viewport_height=540
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+
+[physics]
+2d/default_gravity=0
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
