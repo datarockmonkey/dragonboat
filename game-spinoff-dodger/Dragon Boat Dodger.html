@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Dragon Boat Dodger</title>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      background: #020c1b;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      touch-action: none;
+      font-family: 'Press Start 2P', monospace;
+    }
+    canvas {
+      display: block;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// DRAGON BOAT DODGER  –  HTML5 Canvas game
+// Assets live in ./assets/ (same folder as this file)
+// Controls: Arrow keys / WASD to move  |  SPACE to use skill  |  R to restart
+// Mobile:   Left side drag to steer    |  tap right side for skill
+// ─────────────────────────────────────────────────────────────────────────────
+
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+
+// ── Design resolution ──────────────────────────────────────────────────────
+const DW = 960, DH = 540;
+canvas.width  = DW;
+canvas.height = DH;
+
+function scaleCanvas() {
+  const s = Math.min(window.innerWidth / DW, window.innerHeight / DH);
+  canvas.style.width  = (DW * s) + 'px';
+  canvas.style.height = (DH * s) + 'px';
+}
+window.addEventListener('resize', scaleCanvas);
+scaleCanvas();
+
+// ── Assets ─────────────────────────────────────────────────────────────────
+const IMG = {};
+const ASSET_LIST = [
+  ['bg',      'assets/scrolling_background.png'],
+  ['finish',  'assets/finish_line.png'],
+  ['player',  'assets/green_team_boat.png'],
+  ['enemy',   'assets/red_team_boat.png'],
+  ['zongzi',  'assets/zongzi_sprite.png'],
+  ['t1',      'assets/taunt_f1_cutout.png'],
+  ['t2',      'assets/taunt_f2_precise.png'],
+  ['t3',      'assets/taunt_f3_cutout.png'],
+];
+
+function loadAssets(cb) {
+  let done = 0;
+  ASSET_LIST.forEach(([key, src]) => {
+    const img = new Image();
+    img.onload = img.onerror = () => { if (++done === ASSET_LIST.length) cb(); };
+    img.src = src;
+    IMG[key] = img;
+  });
+}
+
+// ── Game constants ─────────────────────────────────────────────────────────
+const SCROLL_SPEED  = 180;   // river scroll px/s
+const FINISH_DIST   = 6000;  // total distance
+const PLAYER_SPEED  = 235;
+const HIT_R         = 46;    // enemy collision radius
+const PICK_R        = 56;    // zongzi pickup radius
+const SCARE_R       = 380;   // skill scare range
+const MAX_HP        = 3;
+const MAX_CHARGES   = 2;
+const CD_PER_CHARGE = 10;    // seconds to refill 1 charge
+const TAUNT_FT      = 0.20;  // seconds per taunt frame
+const BOAT_W        = 200;   // player render width
+const ENEMY_W       = 185;   // enemy render width
+const ZONGZI_W      = 52;    // zongzi render width
+
+// ── State ──────────────────────────────────────────────────────────────────
+let gameState   = 'start';   // 'start' | 'play' | 'win' | 'lose'
+let bgOffset    = 0;
+let bgWidth     = 1;
+let distTraveled = 0;
+let enemyTimer  = 2.0;
+let zongziTimer = 4.5;
+let lastTS      = null;
+
+// Screen effects
+let dmgFlash    = 0;
+let pickFlash   = 0;
+
+// ── Player object ──────────────────────────────────────────────────────────
+const P = {
+  x: 160, y: DH / 2,
+  hp: MAX_HP,
+  charges: MAX_CHARGES,
+  cooldown: 0,
+  inv: false, invT: 0,          // invincibility
+  taunting: false, tFrame: 0, tTimer: 0,
+};
+
+// ── Entity pools ───────────────────────────────────────────────────────────
+const enemies  = [];
+const zongzis  = [];
+
+// ── Input ──────────────────────────────────────────────────────────────────
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  e.preventDefault && ['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code) && e.preventDefault();
+  if (e.code === 'Space' || e.code === 'Enter') {
+    if (gameState === 'start') startGame();
+    else if (gameState === 'play') activateSkill();
+    else if (gameState === 'win' || gameState === 'lose') resetGame();
+  }
+  if (e.code === 'KeyR' && (gameState === 'win' || gameState === 'lose')) resetGame();
+});
+document.addEventListener('keyup', e => delete keys[e.code]);
+
+// ── Touch controls ─────────────────────────────────────────────────────────
+// Left half of screen = virtual joystick (drag to steer)
+// Right half = tap to skill
+let touch = { active: false, sx: 0, sy: 0, dx: 0, dy: 0 };
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t  = e.touches[0];
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = DW / rect.width;
+  const tx = (t.clientX - rect.left) * scaleX;
+  const ty = (t.clientY - rect.top)  * (DH / rect.height);
+
+  if (gameState === 'start') { startGame(); return; }
+  if (gameState === 'win' || gameState === 'lose') { resetGame(); return; }
+
+  // Right half = skill
+  if (tx > DW / 2) {
+    activateSkill();
+    return;
+  }
+  touch.active = true;
+  touch.sx = tx; touch.sy = ty;
+  touch.dx = 0;  touch.dy = 0;
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!touch.active) return;
+  const t = e.touches[0];
+  const rect = canvas.getBoundingClientRect();
+  touch.dx = (t.clientX - rect.left) * (DW / rect.width)  - touch.sx;
+  touch.dy = (t.clientY - rect.top)  * (DH / rect.height) - touch.sy;
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  touch.active = false;
+  touch.dx = 0; touch.dy = 0;
+}, { passive: false });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAME LOGIC
+// ─────────────────────────────────────────────────────────────────────────────
+
+function startGame() {
+  gameState = 'play';
+}
+
+function resetGame() {
+  P.x = 160; P.y = DH / 2;
+  P.hp = MAX_HP; P.charges = MAX_CHARGES; P.cooldown = 0;
+  P.inv = false; P.taunting = false;
+  enemies.length = 0;
+  zongzis.length = 0;
+  bgOffset = 0; distTraveled = 0;
+  enemyTimer = 2; zongziTimer = 4.5;
+  dmgFlash = 0; pickFlash = 0;
+  gameState = 'play';
+}
+
+function activateSkill() {
+  if (P.charges <= 0 || P.taunting) return;
+  P.charges--;
+  P.taunting = true; P.tFrame = 0; P.tTimer = 0;
+  if (P.charges < MAX_CHARGES && P.cooldown <= 0) P.cooldown = CD_PER_CHARGE;
+
+  // Scare nearest enemy
+  let nearest = null, best = SCARE_R;
+  for (const e of enemies) {
+    const d = Math.hypot(e.x - P.x, e.y - P.y);
+    if (d < best) { best = d; nearest = e; }
+  }
+  if (nearest) { nearest.scared = true; nearest.flashT = 0.5; }
+}
+
+function update(dt) {
+  // ── Background scroll ──
+  bgOffset = (bgOffset + SCROLL_SPEED * dt) % bgWidth;
+
+  // ── Distance ──
+  distTraveled += SCROLL_SPEED * dt;
+  if (distTraveled >= FINISH_DIST) { gameState = 'win'; return; }
+
+  // ── Player movement ──
+  let mx = 0, my = 0;
+  if (keys['ArrowRight'] || keys['KeyD']) mx += 1;
+  if (keys['ArrowLeft']  || keys['KeyA']) mx -= 1;
+  if (keys['ArrowUp']    || keys['KeyW']) my -= 1;
+  if (keys['ArrowDown']  || keys['KeyS']) my += 1;
+
+  // Touch joystick (deadzone 12px)
+  if (touch.active) {
+    const mag = Math.hypot(touch.dx, touch.dy);
+    if (mag > 12) { mx += touch.dx / mag; my += touch.dy / mag; }
+  }
+
+  const mlen = Math.hypot(mx, my) || 1;
+  P.x = Math.max(60, Math.min(DW - 100, P.x + (mx / mlen) * PLAYER_SPEED * dt));
+  P.y = Math.max(65, Math.min(DH  - 65, P.y + (my / mlen) * PLAYER_SPEED * dt));
+
+  // ── Skill cooldown ──
+  if (P.cooldown > 0 && P.charges < MAX_CHARGES) {
+    P.cooldown -= dt;
+    if (P.cooldown <= 0) {
+      P.cooldown = 0;
+      P.charges = Math.min(P.charges + 1, MAX_CHARGES);
+      if (P.charges < MAX_CHARGES) P.cooldown = CD_PER_CHARGE;
+    }
+  }
+
+  // ── Invincibility ──
+  if (P.inv) { P.invT -= dt; if (P.invT <= 0) P.inv = false; }
+
+  // ── Taunt animation ──
+  if (P.taunting) {
+    P.tTimer += dt;
+    if (P.tTimer >= TAUNT_FT) {
+      P.tTimer -= TAUNT_FT;
+      P.tFrame++;
+      if (P.tFrame >= 3) P.taunting = false;
+    }
+  }
+
+  // ── Spawn ──
+  enemyTimer  -= dt;
+  zongziTimer -= dt;
+  if (enemyTimer  <= 0) { spawnEnemy();  enemyTimer  = 1.8 + Math.random() * 1.4; }
+  if (zongziTimer <= 0) { spawnZongzi(); zongziTimer = 4.0 + Math.random() * 5.0; }
+
+  // ── Update enemies ──
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (e.flashT > 0) e.flashT -= dt;
+
+    if (e.scared) {
+      e.x +=  400 * dt;
+      e.y -= e.dy * 100 * dt;
+    } else {
+      e.x += e.dx * e.speed * dt;
+      e.y += e.dy * e.speed * dt;
+    }
+
+    if (e.x < -130 || e.x > 1110 || e.y < -110 || e.y > DH + 110) {
+      enemies.splice(i, 1); continue;
+    }
+
+    // Hit player
+    if (!P.inv && !e.scared) {
+      if (Math.hypot(e.x - P.x, e.y - P.y) < HIT_R) {
+        P.hp--;
+        P.inv  = true; P.invT = 2.2;
+        dmgFlash = 0.45;
+        enemies.splice(i, 1);
+        if (P.hp <= 0) { gameState = 'lose'; return; }
+        continue;
+      }
+    }
+  }
+
+  // ── Update zongzis ──
+  for (let i = zongzis.length - 1; i >= 0; i--) {
+    const z = zongzis[i];
+    z.x    -= 78 * dt;
+    z.bobT += dt * 2.2;
+    z.y     = z.baseY + Math.sin(z.bobT) * 7;
+    if (z.x < -90) { zongzis.splice(i, 1); continue; }
+
+    if (Math.hypot(z.x - P.x, z.y - P.y) < PICK_R) {
+      P.hp = Math.min(MAX_HP, P.hp + 1);
+      pickFlash = 0.35;
+      zongzis.splice(i, 1);
+    }
+  }
+
+  // ── Flash decay ──
+  if (dmgFlash  > 0) dmgFlash  -= dt;
+  if (pickFlash > 0) pickFlash -= dt;
+}
+
+function spawnEnemy() {
+  const pats = [
+    { dx: -1.0,  dy:  0.0  },
+    { dx: -0.82, dy:  0.38 },
+    { dx: -0.82, dy: -0.38 },
+  ];
+  const p = pats[Math.floor(Math.random() * 3)];
+  const len = Math.hypot(p.dx, p.dy);
+  enemies.push({
+    x: DW + 75, y: 80 + Math.random() * (DH - 160),
+    dx: p.dx / len, dy: p.dy / len,
+    speed: 210 + Math.random() * 130,
+    scale: 0.88 + Math.random() * 0.22,
+    scared: false, flashT: 0,
+  });
+}
+
+function spawnZongzi() {
+  const y = 80 + Math.random() * (DH - 160);
+  zongzis.push({ x: DW + 55, y, baseY: y, bobT: Math.random() * Math.PI * 2 });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RENDERING
+// ─────────────────────────────────────────────────────────────────────────────
+
+function render() {
+  ctx.imageSmoothingEnabled = false;
+
+  // ── River background ──
+  ctx.fillStyle = '#0b3b6e';
+  ctx.fillRect(0, 0, DW, DH);
+  if (IMG.bg.complete && IMG.bg.naturalWidth) {
+    const bw = bgWidth;
+    ctx.drawImage(IMG.bg, -bgOffset,      0, bw, DH);
+    ctx.drawImage(IMG.bg,  bw - bgOffset, 0, bw, DH);
+  }
+
+  // ── Screen effects ──
+  if (dmgFlash  > 0) { ctx.fillStyle = `rgba(255,30,30,${dmgFlash  * 0.38})`; ctx.fillRect(0,0,DW,DH); }
+  if (pickFlash > 0) { ctx.fillStyle = `rgba(46,200,80,${pickFlash * 0.32})`; ctx.fillRect(0,0,DW,DH); }
+
+  // ── Zongzis ──
+  if (IMG.zongzi.complete && IMG.zongzi.naturalWidth) {
+    const sc = ZONGZI_W / IMG.zongzi.width;
+    const zw = ZONGZI_W, zh = IMG.zongzi.height * sc;
+    for (const z of zongzis) {
+      const pulse = 0.8 + 0.2 * Math.sin(z.bobT * 1.5);
+      ctx.globalAlpha = pulse;
+      ctx.drawImage(IMG.zongzi, z.x - zw/2, z.y - zh/2, zw, zh);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ── Enemies ──
+  if (IMG.enemy.complete && IMG.enemy.naturalWidth) {
+    const sc = ENEMY_W / IMG.enemy.width;
+    const ew = ENEMY_W, eh = IMG.enemy.height * sc;
+    for (const e of enemies) {
+      ctx.save();
+      ctx.translate(e.x, e.y);
+      if (e.scared && e.flashT > 0) {
+        // Orange scared flash
+        ctx.globalAlpha = 0.65;
+      }
+      ctx.scale(-e.scale, e.scale);           // flip horizontally so boat faces left
+      ctx.drawImage(IMG.enemy, -ew/2, -eh/2, ew, eh);
+      ctx.restore();
+    }
+  }
+
+  // ── Player ──
+  if (IMG.player.complete && IMG.player.naturalWidth) {
+    const sc = BOAT_W / IMG.player.width;
+    const pw = BOAT_W, ph = IMG.player.height * sc;
+    const visible = !P.inv || (Math.floor(Date.now() / 100) % 2 === 0);
+    if (visible) {
+      ctx.drawImage(IMG.player, P.x - pw/2, P.y - ph/2, pw, ph);
+    }
+
+    // Taunt sprite (viral HK paddler with dragon boat oar) 🚣
+    if (P.taunting) {
+      const tauntImgs = [IMG.t1, IMG.t2, IMG.t3];
+      const ti = tauntImgs[Math.min(P.tFrame, 2)];
+      if (ti && ti.complete && ti.naturalWidth) {
+        const ts = 0.27;
+        const tw = ti.width * ts, tth = ti.height * ts;
+        ctx.drawImage(ti, P.x + 55, P.y - 85 - tth / 2, tw, tth);
+        // Skill flash ring
+        ctx.strokeStyle = 'rgba(255,200,0,0.6)';
+        ctx.lineWidth   = 3;
+        ctx.beginPath();
+        ctx.arc(P.x + 55 + tw/2, P.y - 85, 45, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // ── Finish line (slides in near the end) ──
+  if ((gameState === 'win' || distTraveled > FINISH_DIST - 300) && IMG.finish.complete && IMG.finish.naturalWidth) {
+    const fs = DH / IMG.finish.height;
+    const fw = IMG.finish.width * fs;
+    const progress = Math.min(1, (distTraveled - (FINISH_DIST - 300)) / 300);
+    const fx = DW - fw/2 - progress * (DW - fw/2 - DW/2);
+    ctx.drawImage(IMG.finish, fx - fw/2, 0, fw, DH);
+  }
+
+  // ── HUD ──
+  renderHUD();
+
+  // ── Overlay screens ──
+  if      (gameState === 'start') renderStart();
+  else if (gameState === 'win')   renderWin();
+  else if (gameState === 'lose')  renderLose();
+}
+
+// ── HUD ────────────────────────────────────────────────────────────────────
+function renderHUD() {
+  // Top bar
+  ctx.fillStyle = 'rgba(2,12,40,0.85)';
+  ctx.fillRect(0, 0, DW, 54);
+
+  // Hearts
+  ctx.font = '32px serif';
+  for (let i = 0; i < MAX_HP; i++) {
+    ctx.fillStyle = i < P.hp ? '#ff3030' : '#3a3a3a';
+    ctx.fillText('♥', 14 + i * 40, 40);
+  }
+
+  // Oar charges
+  for (let i = 0; i < MAX_CHARGES; i++) {
+    ctx.font = '24px serif';
+    ctx.fillStyle = i < P.charges ? '#ffd700' : '#3a3a3a';
+    ctx.fillText('🚣', 146 + i * 36, 36);
+  }
+
+  // Skill label / cooldown
+  const px8 = fontPx(10);
+  ctx.font = px8;
+  if (gameState === 'play') {
+    if (P.charges > 0 && !P.taunting) {
+      ctx.fillStyle = '#ffff55';
+      ctx.fillText('SKILL [SPACE]', 144, 50);
+    } else if (P.cooldown > 0) {
+      ctx.fillStyle = '#888';
+      ctx.fillText('charging...', 144, 50);
+      // Cooldown bar (fills up)
+      const filled = (CD_PER_CHARGE - P.cooldown) / CD_PER_CHARGE;
+      ctx.fillStyle = '#222';
+      ctx.fillRect(144, 42, 74, 7);
+      ctx.fillStyle = '#ffaa00';
+      ctx.fillRect(144, 42, 74 * filled, 7);
+    } else {
+      ctx.fillStyle = '#555';
+      ctx.fillText('no charges', 144, 50);
+    }
+  }
+
+  // Distance
+  const rem = Math.max(0, FINISH_DIST - distTraveled);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = fontPx(13);
+  ctx.textAlign = 'right';
+  ctx.fillText(Math.ceil(rem) + 'm to FINISH', DW - 14, 34);
+  ctx.textAlign = 'left';
+
+  // Mobile hint (touch targets)
+  if ('ontouchstart' in window && gameState === 'play') {
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(DW/2, 54); ctx.lineTo(DW/2, DH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.font = fontPx(9);
+    ctx.textAlign = 'center';
+    ctx.fillText('DRAG', DW * 0.25, DH - 12);
+    ctx.fillText('SKILL TAP', DW * 0.75, DH - 12);
+    ctx.textAlign = 'left';
+  }
+}
+
+// ── Overlay screens ────────────────────────────────────────────────────────
+function renderStart() {
+  ctx.fillStyle = 'rgba(2,8,25,0.72)';
+  ctx.fillRect(0, 0, DW, DH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd700';
+  ctx.font = fontPx(28);
+  ctx.fillText('🐉  DRAGON BOAT', DW/2, DH/2 - 60);
+  ctx.fillText('DODGER', DW/2, DH/2 - 20);
+
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.font = fontPx(11);
+  ctx.fillText('ARROWS / WASD  ·  SPACE = skill', DW/2, DH/2 + 28);
+
+  ctx.fillStyle = '#ffff44';
+  ctx.font = fontPx(14);
+  ctx.fillText('▶  PRESS SPACE TO START', DW/2, DH/2 + 68);
+  ctx.textAlign = 'left';
+}
+
+function renderWin() {
+  ctx.fillStyle = 'rgba(2,8,25,0.7)';
+  ctx.fillRect(0, 0, DW, DH);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd700';
+  ctx.font = fontPx(42);
+  ctx.fillText('🏆  YOU WIN!', DW/2, DH/2 - 20);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = fontPx(14);
+  ctx.fillText('PRESS R TO PLAY AGAIN', DW/2, DH/2 + 40);
+  ctx.textAlign = 'left';
+}
+
+function renderLose() {
+  ctx.fillStyle = 'rgba(2,8,25,0.72)';
+  ctx.fillRect(0, 0, DW, DH);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ff3030';
+  ctx.font = fontPx(42);
+  ctx.fillText('💀  CAPSIZED!', DW/2, DH/2 - 20);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = fontPx(14);
+  ctx.fillText('PRESS R TO TRY AGAIN', DW/2, DH/2 + 40);
+  ctx.textAlign = 'left';
+}
+
+// ── Font helper (tries Press Start 2P, falls back to monospace) ────────────
+function fontPx(size) {
+  return `${size}px 'Press Start 2P', monospace`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAME LOOP
+// ─────────────────────────────────────────────────────────────────────────────
+function loop(ts) {
+  requestAnimationFrame(loop);
+  const dt = lastTS ? Math.min((ts - lastTS) / 1000, 0.05) : 0;
+  lastTS = ts;
+  if (gameState === 'play') update(dt);
+  render();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BOOT
+// ─────────────────────────────────────────────────────────────────────────────
+loadAssets(() => {
+  // Compute bg tile width from loaded image
+  if (IMG.bg.naturalWidth) {
+    bgWidth = IMG.bg.naturalWidth * (DH / IMG.bg.naturalHeight);
+  }
+  document.fonts.ready.then(() => requestAnimationFrame(loop));
+});
+</script>
+</body>
+</html>
